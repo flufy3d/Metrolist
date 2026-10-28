@@ -2224,6 +2224,19 @@ class MusicService :
     }
 
     /**
+     * Refresh playback UI after an external controller changed the liked state
+     * of a song. Only the currently playing song needs a metadata/notification
+     * refresh; the queue is never touched.
+     */
+    fun refreshLikedStateForCurrentSong(songId: String) {
+        val current = currentSong.value ?: return
+        if (current.id != songId) return
+        currentMediaMetadata.value = player.currentMetadata
+        updateNotification()
+        updateWidgetUI(player.isPlaying)
+    }
+
+    /**
      * Queue a download without changing the current player item or queue.
      *
      * External MediaSession controllers can request a download for any song

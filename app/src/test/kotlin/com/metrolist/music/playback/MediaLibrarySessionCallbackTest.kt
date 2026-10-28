@@ -5,8 +5,11 @@
 
 package com.metrolist.music.playback
 
+import androidx.media3.exoplayer.offline.Download
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -89,5 +92,153 @@ class MediaLibrarySessionCallbackTest {
         assertFalse(isValidDownloadRequest("a b", "Title"))
         assertFalse(isValidDownloadRequest("dQw4w9WgXcQ", null))
         assertFalse(isValidDownloadRequest("dQw4w9WgXcQ", "   "))
+    }
+
+    @Test
+    fun `set liked requires a safe id and an explicit liked flag`() {
+        val parsed = parseSetLikedRequest(
+            songId = "  dQw4w9WgXcQ  ",
+            likedProvided = true,
+            liked = true,
+            title = "  Never Gonna Give You Up  ",
+            artist = "  Rick Astley  ",
+            durationMs = 213_000L,
+            thumbnailUrl = "  https://example.com/a.jpg  ",
+            albumId = "  album-id  ",
+            albumTitle = "  Whenever You Need Somebody  ",
+            explicit = false,
+        )
+        assertNotNull(parsed)
+        assertEquals("dQw4w9WgXcQ", parsed?.songId)
+        assertEquals("Never Gonna Give You Up", parsed?.title)
+        assertEquals("Rick Astley", parsed?.artist)
+        assertEquals(213_000L, parsed?.durationMs)
+        assertEquals("https://example.com/a.jpg", parsed?.thumbnailUrl)
+        assertEquals("album-id", parsed?.albumId)
+        assertEquals("Whenever You Need Somebody", parsed?.albumTitle)
+
+        assertNull(
+            parseSetLikedRequest(
+                songId = "dQw4w9WgXcQ",
+                likedProvided = false,
+                liked = false,
+                title = "Title",
+                artist = null,
+                durationMs = 0L,
+                thumbnailUrl = null,
+                albumId = null,
+                albumTitle = null,
+                explicit = false,
+            ),
+        )
+        assertNull(
+            parseSetLikedRequest(
+                songId = "a/b",
+                likedProvided = true,
+                liked = true,
+                title = "Title",
+                artist = null,
+                durationMs = 0L,
+                thumbnailUrl = null,
+                albumId = null,
+                albumTitle = null,
+                explicit = false,
+            ),
+        )
+        assertNull(
+            parseSetLikedRequest(
+                songId = "",
+                likedProvided = true,
+                liked = true,
+                title = "Title",
+                artist = null,
+                durationMs = 0L,
+                thumbnailUrl = null,
+                albumId = null,
+                albumTitle = null,
+                explicit = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `new liked songs need a title but existing songs do not`() {
+        assertTrue(requiresTitleForLikedWrite(songExists = false, title = null))
+        assertTrue(requiresTitleForLikedWrite(songExists = false, title = "   "))
+        assertFalse(requiresTitleForLikedWrite(songExists = false, title = "Title"))
+        assertFalse(requiresTitleForLikedWrite(songExists = true, title = null))
+    }
+
+    @Test
+    fun `download states map to stable external states`() {
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_NOT_FOUND, progress = -1, cached = false),
+            downloadStateSnapshot(dbDownloaded = false, downloadState = null, percentDownloaded = -1f),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_COMPLETED, progress = 100, cached = true),
+            downloadStateSnapshot(dbDownloaded = true, downloadState = null, percentDownloaded = -1f),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_QUEUED, progress = 0, cached = false),
+            downloadStateSnapshot(dbDownloaded = false, downloadState = Download.STATE_QUEUED, percentDownloaded = 0f),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_DOWNLOADING, progress = 42, cached = false),
+            downloadStateSnapshot(
+                dbDownloaded = false,
+                downloadState = Download.STATE_DOWNLOADING,
+                percentDownloaded = 42.4f,
+            ),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_DOWNLOADING, progress = -1, cached = false),
+            downloadStateSnapshot(
+                dbDownloaded = false,
+                downloadState = Download.STATE_DOWNLOADING,
+                percentDownloaded = -1f,
+            ),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_COMPLETED, progress = 100, cached = true),
+            downloadStateSnapshot(
+                dbDownloaded = false,
+                downloadState = Download.STATE_COMPLETED,
+                percentDownloaded = 100f,
+            ),
+        )
+        assertEquals(
+            DownloadStateSnapshot(
+                DOWNLOAD_STATE_FAILED,
+                progress = -1,
+                cached = true,
+                error = "failure_reason_3",
+            ),
+            downloadStateSnapshot(
+                dbDownloaded = true,
+                downloadState = Download.STATE_FAILED,
+                percentDownloaded = -1f,
+                failureReason = 3,
+            ),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_REMOVED, progress = -1, cached = false),
+            downloadStateSnapshot(dbDownloaded = false, downloadState = Download.STATE_STOPPED, percentDownloaded = -1f),
+        )
+        assertEquals(
+            DownloadStateSnapshot(DOWNLOAD_STATE_REMOVED, progress = -1, cached = false),
+            downloadStateSnapshot(dbDownloaded = false, downloadState = Download.STATE_REMOVING, percentDownloaded = -1f),
+        )
+    }
+
+    @Test
+    fun `new commands reject invalid song ids`() {
+        assertTrue(isValidMediaSongId("dQw4w9WgXcQ"))
+        assertTrue(isValidMediaSongId("  dQw4w9WgXcQ  "))
+        assertFalse(isValidMediaSongId(null))
+        assertFalse(isValidMediaSongId(""))
+        assertFalse(isValidMediaSongId("a/b"))
+        assertFalse(isValidMediaSongId("a b"))
+        assertFalse(isValidMediaSongId("x".repeat(129)))
     }
 }

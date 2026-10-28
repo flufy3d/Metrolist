@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.annotation.DrawableRes
 import androidx.core.net.toUri
+import androidx.datastore.preferences.core.edit
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -35,6 +36,7 @@ import com.metrolist.innertube.models.filterExplicit
 import com.metrolist.innertube.models.filterVideoSongs
 import com.metrolist.music.R
 import com.metrolist.music.constants.AndroidAutoSearchLocalLimitKey
+import com.metrolist.music.constants.AutoDownloadOnLikeKey
 import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.HideVideoSongsKey
 import com.metrolist.music.constants.MediaSessionConstants
@@ -42,11 +44,13 @@ import com.metrolist.music.constants.SongSortType
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.PlaylistEntity
 import com.metrolist.music.db.entities.Song
+import com.metrolist.music.db.entities.SongEntity
 import com.metrolist.music.extensions.toMediaItem
 import com.metrolist.music.extensions.toggleRepeatMode
 import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.utils.dataStore
 import com.metrolist.music.utils.ArtistNameAliases
+import com.metrolist.music.utils.SyncUtils
 import com.metrolist.music.utils.get
 import com.metrolist.music.utils.getArtistSeparator
 import com.metrolist.music.utils.joinToArtistString
@@ -62,6 +66,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
+import timber.log.Timber
+import java.time.LocalDateTime
 import javax.inject.Inject
 import com.metrolist.music.constants.AndroidAutoSectionsOrderKey
 import com.metrolist.music.constants.AndroidAutoYouTubePlaylistsKey
@@ -79,6 +85,7 @@ constructor(
     @ApplicationContext val context: Context,
     val database: MusicDatabase,
     val downloadUtil: DownloadUtil,
+    val syncUtils: SyncUtils,
 ) : MediaLibrarySession.Callback {
     private val scope = CoroutineScope(Dispatchers.Main) + Job()
     lateinit var service: MusicService
@@ -107,6 +114,11 @@ constructor(
                 .add(MediaSessionConstants.CommandToggleRepeatMode)
                 .add(MediaSessionConstants.CommandAddToTargetPlaylist)
                 .add(MediaSessionConstants.CommandDownload)
+                .add(MediaSessionConstants.CommandSetLiked)
+                .add(MediaSessionConstants.CommandGetLikedState)
+                .add(MediaSessionConstants.CommandGetDownloadState)
+                .add(MediaSessionConstants.CommandCancelDownload)
+                .add(MediaSessionConstants.CommandSetAutoDownload)
                 .build(),
             connectionResult.availablePlayerCommands,
         )
@@ -134,9 +146,229 @@ constructor(
                     )
                 }
             }
+
+            MediaSessionConstants.ACTION_SET_LIKED ->
+                return scope.future(Dispatchers.IO) { handleSetLiked(args) }
+
+            MediaSessionConstants.ACTION_GET_LIKED_STATE ->
+                return scope.future(Dispatchers.IO) { handleGetLikedState(args) }
+
+            MediaSessionConstants.ACTION_GET_DOWNLOAD_STATE ->
+                return scope.future(Dispatchers.IO) { handleGetDownloadState(args) }
+
+            MediaSessionConstants.ACTION_CANCEL_DOWNLOAD ->
+                return scope.future(Dispatchers.IO) { handleCancelDownload(args) }
+
+            MediaSessionConstants.ACTION_SET_AUTO_DOWNLOAD ->
+                return scope.future(Dispatchers.IO) { handleSetAutoDownload(args) }
         }
         return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
     }
+
+    /**
+     * Explicitly set the Metrolist liked flag for any song, without requiring it
+     * to be the current player item and without changing the queue.
+     */
+    private suspend fun handleSetLiked(args: Bundle): SessionResult {
+        val request = parseSetLikedRequest(
+            songId = args.getString(MediaSessionConstants.KEY_SONG_ID),
+            likedProvided = args.containsKey(MediaSessionConstants.KEY_LIKED),
+            liked = args.getBoolean(MediaSessionConstants.KEY_LIKED, false),
+            title = args.getString(MediaSessionConstants.KEY_TITLE),
+            artist = args.getString(MediaSessionConstants.KEY_ARTIST),
+            durationMs = args.getLong(MediaSessionConstants.KEY_DURATION_MS, 0L),
+            thumbnailUrl = args.getString(MediaSessionConstants.KEY_THUMBNAIL_URL),
+            albumId = args.getString(MediaSessionConstants.KEY_ALBUM_ID),
+            albumTitle = args.getString(MediaSessionConstants.KEY_ALBUM_TITLE),
+            explicit = args.getBoolean(MediaSessionConstants.KEY_EXPLICIT, false),
+        ) ?: return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+
+        return try {
+            val existing = database.getSongByIdBlocking(request.songId)
+            if (requiresTitleForLikedWrite(existing != null, request.title)) {
+                return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+            }
+
+            val now = LocalDateTime.now()
+            val stored: SongEntity = if (existing == null) {
+                database.insert(request.toMediaMetadata(now))
+                database.songEntity(request.songId)
+                    ?: return SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+            } else {
+                existing.song
+            }
+            val updated = stored.applyLikedState(request.liked, now)
+            if (updated != stored) {
+                database.update(updated)
+            }
+
+            // YouTube writes need feedback tokens from a real YouTube song. If
+            // they are absent this is a local-only change and the result says so.
+            val syncQueued = updated.libraryAddToken != null || updated.libraryRemoveToken != null
+            if (syncQueued) {
+                syncUtils.likeSong(updated)
+            }
+
+            withContext(Dispatchers.Main) {
+                if (::service.isInitialized) {
+                    service.refreshLikedStateForCurrentSong(request.songId)
+                }
+            }
+
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply {
+                    putString(MediaSessionConstants.KEY_SONG_ID, request.songId)
+                    putBoolean(MediaSessionConstants.KEY_LIKED, updated.liked)
+                    putBoolean(MediaSessionConstants.KEY_LOCAL_ONLY, !syncQueued)
+                },
+            )
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to set liked state for ${request.songId}")
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    private suspend fun handleGetLikedState(args: Bundle): SessionResult {
+        val songId = args.getString(MediaSessionConstants.KEY_SONG_ID)?.trim().orEmpty()
+        if (!isValidMediaSongId(songId)) {
+            return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+        }
+
+        return try {
+            val song = database.songEntity(songId)
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply {
+                    putString(MediaSessionConstants.KEY_SONG_ID, songId)
+                    putBoolean(MediaSessionConstants.KEY_EXISTS, song != null)
+                    putBoolean(MediaSessionConstants.KEY_LIKED, song?.liked == true)
+                },
+            )
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to read liked state for $songId")
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    /**
+     * Single-song download lookup: reads one DownloadIndex row and one song row
+     * instead of scanning the whole download list.
+     */
+    private suspend fun handleGetDownloadState(args: Bundle): SessionResult {
+        val songId = args.getString(MediaSessionConstants.KEY_SONG_ID)?.trim().orEmpty()
+        if (!isValidMediaSongId(songId)) {
+            return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+        }
+
+        return try {
+            val song = database.songEntity(songId)
+            val download = downloadUtil.downloadManager.downloadIndex.getDownload(songId)
+            val snapshot = downloadStateSnapshot(
+                dbDownloaded = song?.isDownloaded == true,
+                downloadState = download?.state,
+                percentDownloaded = download?.percentDownloaded ?: -1f,
+                failureReason = download?.failureReason,
+            )
+
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply {
+                    putString(MediaSessionConstants.KEY_SONG_ID, songId)
+                    putString(MediaSessionConstants.KEY_STATE, snapshot.state)
+                    putInt(MediaSessionConstants.KEY_PROGRESS, snapshot.progress)
+                    putBoolean(MediaSessionConstants.KEY_CACHED, snapshot.cached)
+                    snapshot.error?.let { putString(MediaSessionConstants.KEY_ERROR, it) }
+                },
+            )
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to read download state for $songId")
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    private fun handleCancelDownload(args: Bundle): SessionResult {
+        val songId = args.getString(MediaSessionConstants.KEY_SONG_ID)?.trim().orEmpty()
+        if (!isValidMediaSongId(songId)) {
+            return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+        }
+
+        return try {
+            val exists = downloadUtil.downloadManager.downloadIndex.getDownload(songId) != null
+            if (exists) {
+                downloadUtil.downloadManager.removeDownload(songId)
+            }
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply {
+                    putString(MediaSessionConstants.KEY_SONG_ID, songId)
+                    putBoolean(MediaSessionConstants.KEY_REMOVED, exists)
+                },
+            )
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to cancel download for $songId")
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    private suspend fun handleSetAutoDownload(args: Bundle): SessionResult {
+        if (!args.containsKey(MediaSessionConstants.KEY_ENABLED)) {
+            return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+        }
+        val enabled = args.getBoolean(MediaSessionConstants.KEY_ENABLED)
+
+        return try {
+            context.dataStore.edit { it[AutoDownloadOnLikeKey] = enabled }
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply {
+                    putBoolean(MediaSessionConstants.KEY_ENABLED, enabled)
+                },
+            )
+        } catch (e: Exception) {
+            Timber.tag(TAG).w(e, "Failed to update auto-download setting")
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    private fun SetLikedRequest.toMediaMetadata(
+        now: LocalDateTime,
+    ) = com.metrolist.music.models.MediaMetadata(
+        id = songId,
+        title = requireNotNull(title),
+        artists = listOf(
+            com.metrolist.music.models.MediaMetadata.Artist(
+                id = null,
+                name = artist ?: "Unknown",
+            ),
+        ),
+        duration = (durationMs / 1000L).toInt().coerceAtLeast(0),
+        thumbnailUrl = thumbnailUrl,
+        album = albumId?.let {
+            com.metrolist.music.models.MediaMetadata.Album(
+                id = it,
+                title = albumTitle.orEmpty(),
+            )
+        },
+        explicit = explicit,
+        liked = liked,
+        likedDate = if (liked) now else null,
+        inLibrary = if (liked) now else null,
+    )
+
+    /**
+     * Mirrors the stock toggle: liking also puts the song in the library,
+     * unliking leaves library membership alone. Re-applying the same liked value
+     * is idempotent and keeps the original liked date.
+     */
+    private fun SongEntity.applyLikedState(
+        liked: Boolean,
+        now: LocalDateTime,
+    ) = copy(
+        liked = liked,
+        likedDate = if (liked) likedDate ?: now else null,
+        inLibrary = if (liked) inLibrary ?: now else inLibrary,
+    )
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onPlaybackResumption(
@@ -969,6 +1201,8 @@ internal fun <T> List<T>.paginate(
 }
 
 internal const val MAX_ANDROID_AUTO_PAGE_SIZE = 500
+
+private const val TAG = "MediaLibrarySession"
 
 internal data class AndroidAutoPageRequest(
     val offset: Int,
