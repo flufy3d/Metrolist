@@ -1440,21 +1440,23 @@ class MusicService :
                 hasAudioFocus = false
                 audioFocusVolumeMultiplier.value = 1f
                 wasPlayingBeforeAudioFocusLoss = player.isPlaying
+                // Set before pausing so onPlayWhenReadyChanged can tell this
+                // focus-driven pause apart from a user pause.
+                lastAudioFocusState = focusChange
                 if (player.isPlaying) {
                     player.pause()
                 }
                 abandonAudioFocus()
-                lastAudioFocusState = focusChange
             }
 
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 hasAudioFocus = false
                 audioFocusVolumeMultiplier.value = 1f
                 wasPlayingBeforeAudioFocusLoss = player.isPlaying
+                lastAudioFocusState = focusChange
                 if (player.isPlaying) {
                     player.pause()
                 }
-                lastAudioFocusState = focusChange
             }
 
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -2785,6 +2787,15 @@ class MusicService :
 
             if (!playWhenReady && !isPausedByVolumeMute) {
                 wasPlayingBeforeVolumeMute = false
+            }
+
+            // A user pause while another app holds transient focus (e.g. a
+            // ducking voice assistant) must not be undone when focus returns.
+            if (!playWhenReady &&
+                lastAudioFocusState != AudioManager.AUDIOFOCUS_LOSS &&
+                lastAudioFocusState != AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+            ) {
+                wasPlayingBeforeAudioFocusLoss = false
             }
         }
 
