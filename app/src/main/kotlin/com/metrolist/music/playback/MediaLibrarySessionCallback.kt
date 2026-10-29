@@ -1027,6 +1027,7 @@ constructor(
                     }
 
                     val searchResults = mutableListOf<Song>()
+                    val onlineSongs = mutableListOf<Song>()
                     val limit = context.dataStore.get(AndroidAutoSearchLocalLimitKey, 75)
 
                     val allLocalSongs = database.searchSongsExtended(searchQuery, limit).first()
@@ -1059,6 +1060,7 @@ constructor(
                                 database.query { insert(songItem.toMediaMetadata()) }
                                 database.song(songItem.id).first()?.let { newSong ->
                                     searchResults.add(newSong)
+                                    onlineSongs.add(newSong)
                                 }
                             } catch (e: Exception) {
                             }
@@ -1075,7 +1077,11 @@ constructor(
                         if (isVoiceSearch) {    //Check if the voiceQuery is about a specific song
                             val snapshot: List<Song> =
                                 synchronized(searchResults) { searchResults.toList() }
+                            // Titles often carry suffixes like "(Official Video)" or
+                            // "(Live)" that the matcher rejects. YouTube's top hit is
+                            // still the best fallback for a voice request.
                             VoiceSearchMatcher.findBest(searchQuery, snapshot)
+                                ?: onlineSongs.firstOrNull()
                         } else {
                             searchResults.firstOrNull { it.id == songId }
                         }
@@ -1092,14 +1098,24 @@ constructor(
                         }.getOrNull()
 
                         if (radioStatus != null && radioStatus.items.isNotEmpty()) {
-                            withContext(Dispatchers.Main) {
-                                service.adoptQueue(radioQueue, radioStatus.title, radioStatus.items.size) //Used to make the radio queue load more songs when near the end
+                            // YouTube radio can omit the seed track and return only
+                            // related songs. Starting at 0 then plays an unrelated
+                            // song, so only adopt the radio when it actually
+                            // contains the requested song; otherwise fall back to
+                            // the single-item queue below.
+                            val seedIndex = radioStatus.items.indexOfFirst {
+                                it.mediaId == selectedSong.id
                             }
-                            return@future MediaItemsWithStartPosition(
-                                radioStatus.items,
-                                radioStatus.items.indexOfFirst { it.mediaId == selectedSong.id }.coerceAtLeast(0),
-                                C.TIME_UNSET,
-                            )
+                            if (seedIndex >= 0) {
+                                withContext(Dispatchers.Main) {
+                                    service.adoptQueue(radioQueue, radioStatus.title, radioStatus.items.size) //Used to make the radio queue load more songs when near the end
+                                }
+                                return@future MediaItemsWithStartPosition(
+                                    radioStatus.items,
+                                    seedIndex,
+                                    C.TIME_UNSET,
+                                )
+                            }
                         }
                     }
 
