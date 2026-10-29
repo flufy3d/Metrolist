@@ -35,6 +35,16 @@ class MediaLibrarySessionCallbackTest {
     }
 
     @Test
+    fun `pagination never returns more than one page`() {
+        val results = List(82) { "song-$it" }
+
+        assertEquals(30, results.paginate(page = 0, pageSize = 30).size)
+        assertEquals("song-30", results.paginate(page = 1, pageSize = 30).first())
+        assertEquals(22, results.paginate(page = 2, pageSize = 30).size)
+        assertEquals(30, results.paginate(page = -1, pageSize = 30).size)
+    }
+
+    @Test
     fun `database pages are capped before loading relations`() {
         assertEquals(
             AndroidAutoPageRequest(offset = 0, limit = MAX_ANDROID_AUTO_PAGE_SIZE),

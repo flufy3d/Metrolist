@@ -869,8 +869,11 @@ constructor(
                     reportException(e)
                 }
                 
-                LibraryResult.ofItemList(searchResults, params)
-                
+                // Media3 rejects any page whose item count exceeds pageSize, so
+                // hand back only the slice the browser asked for. Search results
+                // combine local songs and YouTube hits in one ranked list.
+                LibraryResult.ofItemList(searchResults.paginate(page, pageSize), params)
+
             } catch (e: Exception) {
                 reportException(e)
                 LibraryResult.ofItemList(emptyList(), params)
@@ -1195,8 +1198,10 @@ internal fun <T> List<T>.paginate(
     page: Int,
     pageSize: Int,
 ): List<T> {
-    val fromIndex = (page.toLong() * pageSize).coerceAtMost(size.toLong()).toInt()
-    val toIndex = (fromIndex.toLong() + pageSize).coerceAtMost(size.toLong()).toInt()
+    val safePage = page.coerceAtLeast(0)
+    val safePageSize = pageSize.coerceAtLeast(0)
+    val fromIndex = (safePage.toLong() * safePageSize).coerceAtMost(size.toLong()).toInt()
+    val toIndex = (fromIndex.toLong() + safePageSize).coerceAtMost(size.toLong()).toInt()
     return subList(fromIndex, toIndex)
 }
 
