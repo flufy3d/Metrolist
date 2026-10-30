@@ -119,6 +119,7 @@ constructor(
                 .add(MediaSessionConstants.CommandGetDownloadState)
                 .add(MediaSessionConstants.CommandCancelDownload)
                 .add(MediaSessionConstants.CommandSetAutoDownload)
+                .add(MediaSessionConstants.CommandPlayQueue)
                 .build(),
             connectionResult.availablePlayerCommands,
         )
@@ -161,6 +162,9 @@ constructor(
 
             MediaSessionConstants.ACTION_SET_AUTO_DOWNLOAD ->
                 return scope.future(Dispatchers.IO) { handleSetAutoDownload(args) }
+
+            MediaSessionConstants.ACTION_PLAY_QUEUE ->
+                return scope.future(Dispatchers.IO) { handlePlayQueue(args) }
         }
         return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
     }
@@ -330,6 +334,64 @@ constructor(
             SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
         }
     }
+
+    /**
+     * Replace the player queue with an explicit, ordered song list from an
+     * external controller (a user playlist in Mingyue). onSetMediaItems only
+     * looks at the first item and builds a search/radio queue from it, so a
+     * multi-item setMediaItems cannot express this. Known songs use their
+     * database row; unknown ones are played from the supplied metadata. The
+     * queue is a ListQueue, so nothing is appended after the last song.
+     */
+    private suspend fun handlePlayQueue(args: Bundle): SessionResult {
+        val request = parsePlayQueueRequest(
+            songIds = args.getStringArrayList(MediaSessionConstants.KEY_SONG_IDS),
+            titles = args.getStringArrayList(MediaSessionConstants.KEY_TITLES),
+            artists = args.getStringArrayList(MediaSessionConstants.KEY_ARTISTS),
+            thumbnailUrls = args.getStringArrayList(MediaSessionConstants.KEY_THUMBNAIL_URLS),
+            durationsMs = args.getLongArray(MediaSessionConstants.KEY_DURATIONS_MS),
+            startIndex = args.getInt(MediaSessionConstants.KEY_START_INDEX, 0),
+            title = args.getString(MediaSessionConstants.KEY_QUEUE_TITLE),
+        ) ?: return SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE)
+
+        return try {
+            val items = request.entries.map { entry ->
+                database.getSongByIdBlocking(entry.songId)?.toMediaItem()
+                    ?: entry.toMediaMetadata().toMediaItem()
+            }
+            withContext(Dispatchers.Main) {
+                service.playQueue(
+                    ListQueue(
+                        title = request.title,
+                        items = items,
+                        startIndex = request.startIndex,
+                    ),
+                )
+            }
+            SessionResult(
+                SessionResult.RESULT_SUCCESS,
+                Bundle().apply { putInt(MediaSessionConstants.KEY_COUNT, items.size) },
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            reportException(e)
+            SessionResult(SessionResult.RESULT_ERROR_UNKNOWN)
+        }
+    }
+
+    private fun PlayQueueEntry.toMediaMetadata() = com.metrolist.music.models.MediaMetadata(
+        id = songId,
+        title = title,
+        artists = listOf(
+            com.metrolist.music.models.MediaMetadata.Artist(
+                id = null,
+                name = artist ?: "Unknown",
+            ),
+        ),
+        duration = (durationMs / 1000L).toInt().coerceAtLeast(0),
+        thumbnailUrl = thumbnailUrl,
+    )
 
     private fun SetLikedRequest.toMediaMetadata(
         now: LocalDateTime,

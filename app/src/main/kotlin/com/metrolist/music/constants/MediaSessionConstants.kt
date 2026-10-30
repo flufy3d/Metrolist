@@ -21,6 +21,7 @@ object MediaSessionConstants {
     const val ACTION_GET_DOWNLOAD_STATE = "GET_DOWNLOAD_STATE"
     const val ACTION_CANCEL_DOWNLOAD = "CANCEL_DOWNLOAD"
     const val ACTION_SET_AUTO_DOWNLOAD = "SET_AUTO_DOWNLOAD"
+    const val ACTION_PLAY_QUEUE = "PLAY_QUEUE"
 
     const val KEY_SONG_ID = "songId"
     const val KEY_TITLE = "title"
@@ -40,6 +41,14 @@ object MediaSessionConstants {
     const val KEY_EXISTS = "exists"
     const val KEY_REMOVED = "removed"
     const val KEY_LOCAL_ONLY = "localOnly"
+    const val KEY_SONG_IDS = "songIds"
+    const val KEY_TITLES = "titles"
+    const val KEY_ARTISTS = "artists"
+    const val KEY_THUMBNAIL_URLS = "thumbnailUrls"
+    const val KEY_DURATIONS_MS = "durationsMs"
+    const val KEY_START_INDEX = "startIndex"
+    const val KEY_QUEUE_TITLE = "queueTitle"
+    const val KEY_COUNT = "count"
 
     val CommandToggleLibrary = SessionCommand(ACTION_TOGGLE_LIBRARY, Bundle.EMPTY)
     val CommandToggleLike = SessionCommand(ACTION_TOGGLE_LIKE, Bundle.EMPTY)
@@ -53,6 +62,7 @@ object MediaSessionConstants {
     val CommandGetDownloadState = SessionCommand(ACTION_GET_DOWNLOAD_STATE, Bundle.EMPTY)
     val CommandCancelDownload = SessionCommand(ACTION_CANCEL_DOWNLOAD, Bundle.EMPTY)
     val CommandSetAutoDownload = SessionCommand(ACTION_SET_AUTO_DOWNLOAD, Bundle.EMPTY)
+    val CommandPlayQueue = SessionCommand(ACTION_PLAY_QUEUE, Bundle.EMPTY)
 
     const val TARGET_PLAYLIST_AUTO = "auto"
 }
