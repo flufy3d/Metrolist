@@ -1603,8 +1603,24 @@ class MusicService :
         player.pause()
     }
 
+    /**
+     * Last action layout applied to the session.
+     *
+     * [updateNotification] is driven by [currentSong], which can emit on every
+     * song-row change. Re-applying an identical layout dispatches it to every
+     * connected controller (and to the legacy session) for nothing, so skip it
+     * when shuffle/like/repeat/song-presence did not change.
+     */
+    private var lastNotificationLayoutSignature: String? = null
+
     private fun updateNotification(isLiked: Boolean? = currentSong.value?.song?.let { if (it.isEpisode) it.inLibrary != null else it.liked }) {
-        mediaSession?.setCustomLayout(
+        val session = mediaSession ?: return
+        val signature =
+            "${player.shuffleModeEnabled}|${isLiked}|${player.repeatMode}|${currentSong.value != null}"
+        if (signature == lastNotificationLayoutSignature) return
+        lastNotificationLayoutSignature = signature
+
+        session.setCustomLayout(
             listOf(
                 CommandButton
                     .Builder()
@@ -4468,11 +4484,48 @@ class MusicService :
         return mediaSession
     }
 
+    /**
+     * Last notification state that was actually posted.
+     *
+     * Media3's `MediaNotificationManager.MediaControllerListener.onEvents` calls
+     * [onUpdateNotification] for every `EVENT_PLAYBACK_STATE_CHANGED`,
+     * `EVENT_PLAY_WHEN_READY_CHANGED`, `EVENT_MEDIA_METADATA_CHANGED` and
+     * `EVENT_TIMELINE_CHANGED`. ExoPlayer emits timeline changes while a stream
+     * settles, so the notification was re-posted ~7-15 times per minute on the
+     * X10A; SystemUI inflated a new view tree each time (187 MB / 12.9k Views
+     * after 2.6 days). Skip the post when nothing visible changed.
+     *
+     * The artwork-loaded callback bypasses this method (it goes straight to
+     * `updateNotificationInternal`), so the bitmap refresh still lands.
+     */
+    private var lastNotificationSignature: String? = null
+
     override fun onUpdateNotification(
         session: MediaSession,
         startInForegroundRequired: Boolean,
     ) {
         if (taskCleared) return
+        val sessionPlayer = session.player
+        val metadata = sessionPlayer.mediaMetadata
+        val signature =
+            buildString {
+                append(sessionPlayer.playbackState).append('|')
+                append(sessionPlayer.isPlaying).append('|')
+                append(sessionPlayer.playWhenReady).append('|')
+                append(sessionPlayer.shuffleModeEnabled).append('|')
+                append(sessionPlayer.repeatMode).append('|')
+                append(sessionPlayer.hasNextMediaItem()).append('|')
+                append(sessionPlayer.hasPreviousMediaItem()).append('|')
+                append(metadata.mediaId).append('|')
+                append(metadata.title).append('|')
+                append(metadata.artist).append('|')
+                append(metadata.albumTitle).append('|')
+                append(metadata.artworkUri).append('|')
+                append(metadata.durationMs).append('|')
+                append(currentSong.value?.song?.liked)
+            }
+        if (!startInForegroundRequired && signature == lastNotificationSignature) return
+        lastNotificationSignature = signature
         try {
             super.onUpdateNotification(session, startInForegroundRequired)
         } catch (e: ForegroundServiceStartNotAllowedException) {
